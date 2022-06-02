@@ -5,3 +5,9 @@ A simple LoRa RX/TX example for the [RAK11200 ESP32 Core](https://store.rakwirel
 ![Board](Board.jpg)
 ![Screenshot](Screenshot.jpg)
 ![SDRPP](SDRPP.jpg)
+
+## UPDATE 2022/06/02
+
+I added RNG via the LoRa sx1262 chip. The packets sent back fill up the remainder of the 64-byte packet with random bytes – just for kicks.
+
+![Random](Random.png)
