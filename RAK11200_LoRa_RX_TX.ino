@@ -11,6 +11,9 @@
 #define RX_TIMEOUT_VALUE 30000
 #define TX_TIMEOUT_VALUE 6000
 
+#define MODE_ECB 1
+#define MODE_CBC 2
+
 #include <Arduino.h>
 #include <SX126x-Arduino.h> //http://librarymanager/All#SX126x
 #include <SPI.h>
@@ -37,6 +40,7 @@ char encBuf[256] = {0}; // Let's make sure we have enough space for the encrypte
 char decBuf[256] = {0}; // Let's make sure we have enough space for the decrypted string
 uint8_t pKey[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 uint8_t pKeyLen = 16;
+uint8_t IV[16] = {0};
 
 void hexDump(unsigned char *, uint16_t);
 void fillRandom(uint8_t *, uint8_t);
@@ -91,16 +95,19 @@ void setup() {
   // but I am foolish that way.
   Serial.println("Plain text:");
   hexDump((unsigned char *)msg, msgLen);
+  fillRandom(pKey, pKeyLen);
   Serial.println("pKey:");
   hexDump(pKey, 16);
-  uint8_t IV[16] = {1};
+  fillRandom(IV, 16);
+  Serial.println("IV:");
+  hexDump(pKey, 16);
   double t0, t1;
 
   uint16_t olen;
   uint32_t count = 0;
   t0 = millis();
   while (true) {
-    olen = encryptECB((uint8_t*)msg, strlen(msg));
+    olen = encrypt((uint8_t*)msg, strlen(msg), MODE_ECB);
     count++;
     t1 = millis() - t0;
     if (t1 > 999) break;
@@ -113,12 +120,37 @@ void setup() {
   count = 0;
   t0 = millis();
   while (true) {
-    olen = decryptECB((uint8_t*)decBuf, olen);
+    olen = decrypt((uint8_t*)decBuf, olen, MODE_ECB);
     count++;
     t1 = millis() - t0;
     if (t1 > 999) break;
   }
   sprintf(buf, "%d ECB Decoding rounds in 1 second:", count);
+  Serial.println(buf);
+  hexDump((unsigned char *)encBuf, olen);
+
+  count = 0;
+  t0 = millis();
+  while (true) {
+    olen = encrypt((uint8_t*)msg, strlen(msg), MODE_CBC);
+    count++;
+    t1 = millis() - t0;
+    if (t1 > 999) break;
+  }
+  sprintf(buf, "%d CBC Encoding rounds in 1 second:", count);
+  Serial.println(buf);
+  hexDump((unsigned char *)encBuf, olen);
+  memcpy(decBuf, encBuf, olen);
+
+  count = 0;
+  t0 = millis();
+  while (true) {
+    olen = decrypt((uint8_t*)decBuf, olen, MODE_CBC);
+    count++;
+    t1 = millis() - t0;
+    if (t1 > 999) break;
+  }
+  sprintf(buf, "%d CBC Decoding rounds in 1 second:", count);
   Serial.println(buf);
   hexDump((unsigned char *)encBuf, olen);
 }
@@ -197,7 +229,7 @@ void OnCadDone(bool cadResult) {
   }
 }
 
-int16_t decryptECB(uint8_t* myBuf, uint8_t olen) {
+int16_t decrypt(uint8_t* myBuf, uint8_t olen, uint8_t mode) {
   // Test the total len vs requirements:
   // AES: min 16 bytes
   // HMAC if needed: 28 bytes
@@ -205,21 +237,27 @@ int16_t decryptECB(uint8_t* myBuf, uint8_t olen) {
   if (olen < reqLen) return -1;
   uint8_t len;
   // or just copy over
+  memset(encBuf, 0, 256);
   memcpy(encBuf, myBuf, olen);
   len = olen;
   struct AES_ctx ctx;
-  AES_init_ctx(&ctx, pKey);
-  uint8_t rounds = len / 16, steps = 0;
-  for (uint8_t ix = 0; ix < rounds; ix++) {
-    // void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf);
-    AES_ECB_decrypt(&ctx, (uint8_t*)encBuf + steps);
-    steps += 16;
-    // decrypts in place, 16 bytes at a time
-  } encBuf[steps] = 0;
+  if (mode == MODE_CBC) {
+    AES_init_ctx_iv(&ctx, pKey, IV);
+    AES_CBC_decrypt_buffer(&ctx, (uint8_t*)encBuf, len);
+  } else if (mode == MODE_ECB) {
+    AES_init_ctx(&ctx, pKey);
+    uint8_t rounds = len / 16, steps = 0;
+    for (uint8_t ix = 0; ix < rounds; ix++) {
+      // void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf);
+      if (mode == MODE_ECB) AES_ECB_decrypt(&ctx, (uint8_t*)encBuf + steps);
+      steps += 16;
+      // decrypts in place, 16 bytes at a time
+    }
+  } else return 0xFFFF; // we dinna do shit.
   return len;
 }
 
-uint16_t encryptECB(uint8_t* myBuf, uint8_t len) {
+uint16_t encrypt(uint8_t* myBuf, uint8_t len, uint8_t mode) {
   // first ascertain length
   uint16_t olen = len;
   struct AES_ctx ctx;
@@ -232,12 +270,17 @@ uint16_t encryptECB(uint8_t* myBuf, uint8_t len) {
   memset(encBuf, (olen - len), olen);
   memcpy(encBuf, myBuf, len);
   encBuf[len] = 0;
-  AES_init_ctx(&ctx, pKey);
-  uint8_t rounds = olen / 16, steps = 0;
-  for (uint8_t ix = 0; ix < rounds; ix++) {
-    AES_ECB_encrypt(&ctx, (uint8_t*)(encBuf + steps));
-    steps += 16;
-    // encrypts in place, 16 bytes at a time
-  }
+  if (mode == MODE_CBC) {
+    AES_init_ctx_iv(&ctx, pKey, IV);
+    AES_CBC_encrypt_buffer(&ctx, (uint8_t*)encBuf, len);
+  } else if (mode == MODE_ECB) {
+    AES_init_ctx(&ctx, pKey);
+    uint8_t rounds = olen / 16, steps = 0;
+    for (uint8_t ix = 0; ix < rounds; ix++) {
+      AES_ECB_encrypt(&ctx, (uint8_t*)(encBuf + steps));
+      steps += 16;
+      // encrypts in place, 16 bytes at a time
+    }
+  } else return 0xFFFF;
   return olen;
 }
