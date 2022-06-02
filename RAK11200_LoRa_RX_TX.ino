@@ -1,15 +1,8 @@
-/**
-  @file LoRaP2P_RX.ino
-  @author rakwireless.com
-  @brief Receiver node for LoRa point to point communication
-  @version 0.1
-  @date 2021-08-21
-  @copyright Copyright (c) 2020
-
-*/
 #include <Arduino.h>
 #include <SX126x-Arduino.h> //http://librarymanager/All#SX126x
 #include <SPI.h>
+#include "aes.c"
+#include "Sx1262LoRandom.h"
 
 // Function declarations
 void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr);
@@ -21,11 +14,11 @@ void OnTxTimeout(void);
 void OnCadDone(bool);
 
 // Define LoRa parameters
-#define RF_FREQUENCY 868300000  // Hz
-#define TX_OUTPUT_POWER 22    // dBm
-#define LORA_BANDWIDTH 0    // [0: 125 kHz, 1: 250 kHz, 2: 500 kHz, 3: Reserved]
+#define RF_FREQUENCY 868300000 // Hz
+#define TX_OUTPUT_POWER 22 // dBm
+#define LORA_BANDWIDTH 0 // [0: 125 kHz, 1: 250 kHz, 2: 500 kHz, 3: Reserved]
 #define LORA_SPREADING_FACTOR 7 // [SF7..SF12]
-#define LORA_CODINGRATE 1   // [1: 4/5, 2: 4/6,  3: 4/7,  4: 4/8]
+#define LORA_CODINGRATE 1 // [1: 4/5, 2: 4/6,  3: 4/7,  4: 4/8]
 #define LORA_PREAMBLE_LENGTH 8  // Same for Tx and Rx
 #define LORA_SYMBOL_TIMEOUT 0 // Symbols
 #define LORA_FIX_LENGTH_PAYLOAD_ON false
@@ -39,6 +32,14 @@ static uint8_t RcvBuffer[64];
 int16_t myRSSI;
 int8_t mySNR;
 uint32_t cadTime;
+char buf[256] = {0};
+char encBuf[256] = {0}; // Let's make sure we have enough space for the encrypted string
+char decBuf[256] = {0}; // Let's make sure we have enough space for the decrypted string
+uint8_t pKey[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+uint8_t pKeyLen = 16;
+
+void hexDump(unsigned char *, uint16_t);
+void fillRandom(uint8_t *, uint8_t);
 
 void setup() {
   pinMode(WB_IO2, OUTPUT);
@@ -83,43 +84,48 @@ void setup() {
   // Start LoRa
   Serial.println("Starting Radio.Rx");
   Radio.Rx(RX_TIMEOUT_VALUE);
+
+  char *msg = "Hello user! This is a plain text string!";
+  uint8_t msgLen = strlen(msg);
+  // please note dear reader – and you should RTFM – that this string's length isn't a multiple of 16.
+  // but I am foolish that way.
+  Serial.println("Plain text:");
+  hexDump((unsigned char *)msg, msgLen);
+  Serial.println("pKey:");
+  hexDump(pKey, 16);
+  uint8_t IV[16] = {1};
+  double t0, t1;
+
+  uint16_t olen;
+  uint32_t count = 0;
+  t0 = millis();
+  while (true) {
+    olen = encryptECB((uint8_t*)msg, strlen(msg));
+    count++;
+    t1 = millis() - t0;
+    if (t1 > 999) break;
+  }
+  sprintf(buf, "%d ECB Encoding rounds in 1 second:", count);
+  Serial.println(buf);
+  hexDump((unsigned char *)encBuf, olen);
+  memcpy(decBuf, encBuf, olen);
+
+  count = 0;
+  t0 = millis();
+  while (true) {
+    olen = decryptECB((uint8_t*)decBuf, olen);
+    count++;
+    t1 = millis() - t0;
+    if (t1 > 999) break;
+  }
+  sprintf(buf, "%d ECB Decoding rounds in 1 second:", count);
+  Serial.println(buf);
+  hexDump((unsigned char *)encBuf, olen);
 }
 
 void loop() {
   // Put your application tasks here, like reading of sensors,
   // Controlling actuators and/or other functions.
-}
-
-void hexDump(uint8_t* buf, uint16_t len) {
-  // Something similar to the Unix/Linux hexdump -C command
-  // Pretty-prints the contents of a buffer, 16 bytes a row
-  char alphabet[17] = "0123456789abcdef";
-  uint16_t i, index;
-  Serial.print(F("   +------------------------------------------------+ +----------------+\n"));
-  Serial.print(F("   |.0 .1 .2 .3 .4 .5 .6 .7 .8 .9 .a .b .c .d .e .f | |      ASCII     |\n"));
-  for (i = 0; i < len; i += 16) {
-    if (i % 128 == 0) Serial.print(F("   +------------------------------------------------+ +----------------+\n"));
-    char s[] = "|                                                | |                |\n";
-    // pre-formated line. We will replace the spaces with text when appropriate.
-    uint8_t ix = 1, iy = 52, j;
-    for (j = 0; j < 16; j++) {
-      if (i + j < len) {
-        uint8_t c = buf[i + j];
-        // fastest way to convert a byte to its 2-digit hex equivalent
-        s[ix++] = alphabet[(c >> 4) & 0x0F];
-        s[ix++] = alphabet[c & 0x0F];
-        ix++;
-        if (c > 31 && c < 128) s[iy++] = c;
-        else s[iy++] = '.'; // display ASCII code 0x20-0x7F or a dot.
-      }
-    }
-    index = i / 16;
-    // display line number then the text
-    if (i < 256) Serial.write(' ');
-    Serial.print(index, HEX); Serial.write('.');
-    Serial.print(s);
-  }
-  Serial.print(F("   +------------------------------------------------+ +----------------+\n"));
 }
 
 /**@brief Function to be executed on Radio Rx Done event
@@ -167,7 +173,11 @@ void OnTxTimeout(void) {
 void send() {
   memset(TxdBuffer, 0, 64);
   sprintf((char*)TxdBuffer, "Received at RSSI %d, SNR %d", myRSSI, mySNR);
-  Serial.printf("Sending:\n%s\n", (char*)TxdBuffer);
+  uint8_t bufLen = strlen((char*)TxdBuffer) + 1;
+  uint8_t remainderLen = 64 - bufLen;
+  fillRandom(TxdBuffer + bufLen, remainderLen);
+  Serial.println("Sending:");
+  hexDump(TxdBuffer, 64);
   Radio.Standby();
   delay(500);
   Radio.SetCadParams(LORA_CAD_08_SYMBOL, LORA_SPREADING_FACTOR + 13, 10, LORA_CAD_ONLY, 0);
@@ -185,4 +195,49 @@ void OnCadDone(bool cadResult) {
     Radio.Send(TxdBuffer, 64); // strlen((char*)TxdBuffer)
     Serial.println(" done!");
   }
+}
+
+int16_t decryptECB(uint8_t* myBuf, uint8_t olen) {
+  // Test the total len vs requirements:
+  // AES: min 16 bytes
+  // HMAC if needed: 28 bytes
+  uint8_t reqLen = 16;
+  if (olen < reqLen) return -1;
+  uint8_t len;
+  // or just copy over
+  memcpy(encBuf, myBuf, olen);
+  len = olen;
+  struct AES_ctx ctx;
+  AES_init_ctx(&ctx, pKey);
+  uint8_t rounds = len / 16, steps = 0;
+  for (uint8_t ix = 0; ix < rounds; ix++) {
+    // void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf);
+    AES_ECB_decrypt(&ctx, (uint8_t*)encBuf + steps);
+    steps += 16;
+    // decrypts in place, 16 bytes at a time
+  } encBuf[steps] = 0;
+  return len;
+}
+
+uint16_t encryptECB(uint8_t* myBuf, uint8_t len) {
+  // first ascertain length
+  uint16_t olen = len;
+  struct AES_ctx ctx;
+  if (olen != 16) {
+    if (olen % 16 > 0) {
+      if (olen < 16) olen = 16;
+      else olen += 16 - (olen % 16);
+    }
+  }
+  memset(encBuf, (olen - len), olen);
+  memcpy(encBuf, myBuf, len);
+  encBuf[len] = 0;
+  AES_init_ctx(&ctx, pKey);
+  uint8_t rounds = olen / 16, steps = 0;
+  for (uint8_t ix = 0; ix < rounds; ix++) {
+    AES_ECB_encrypt(&ctx, (uint8_t*)(encBuf + steps));
+    steps += 16;
+    // encrypts in place, 16 bytes at a time
+  }
+  return olen;
 }
